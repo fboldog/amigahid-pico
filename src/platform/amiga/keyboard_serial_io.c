@@ -20,6 +20,7 @@
 #include <stdbool.h>
 
 #include "pico/stdlib.h"
+#include "pico/util/queue.h"
 #include "hardware/gpio.h"
 #include "class/hid/hid.h"
 
@@ -40,12 +41,54 @@ static bool reset_line_was_low = false;
 
 enum _keyboard_pin_state { LOW, HIGH };
 
+#define AKB_EVENT_QUEUE_DEPTH 64
+
+typedef enum
+{
+    AKB_EVENT_SEND = 0,
+    AKB_EVENT_ASSERT_RESET,
+    AKB_EVENT_RELEASE_RESET,
+} amiga_keyboard_event_type_t;
+
+typedef struct
+{
+    amiga_keyboard_event_type_t type;
+    uint8_t keycode;
+    bool up;
+} amiga_keyboard_event_t;
+
+static queue_t keyboard_event_queue;
+
 static inline void amiga_reset_stateful_flags(void)
 {
     if (caps_lock) {
         caps_lock = false;
         usb_hid_sync_keyboard_leds();
     }
+}
+
+static void amiga_clear_queued_events(void)
+{
+    amiga_keyboard_event_t event;
+
+    while (queue_try_remove(&keyboard_event_queue, &event))
+        ;
+}
+
+static bool amiga_queue_event(amiga_keyboard_event_t const *event, bool critical)
+{
+    if (queue_try_add(&keyboard_event_queue, event))
+        return true;
+
+    if (critical) {
+        amiga_clear_queued_events();
+
+        if (queue_try_add(&keyboard_event_queue, event))
+            return true;
+    }
+
+    ahprintf("[akb] queue full, dropped event type %u\n", event->type);
+    return false;
 }
 
 // @todo this is copy-pasta from quad_mouse; move to util/io.c
@@ -86,6 +129,38 @@ uint8_t get_modifier_from_hid(hid_keyboard_modifier_bm_t modifier)
     return 0;
 }
 
+static void amiga_send_immediate(uint8_t keycode, bool up)
+{
+    uint8_t bit_position, bit_mask = 0x80, sendcode;
+
+    // copy input code, roll left, move msb to lsb
+    sendcode = keycode | (up ? 0x80 : 0x00);
+    sendcode <<= 1;
+    if (up || (keycode & 0x80))
+        sendcode |= 1;
+
+    for (bit_position = 0; bit_position < 8; bit_position++) {
+        if (sendcode & bit_mask)
+            _keyboard_gpio_set(KBD_AMIGA_DAT, LOW);
+        else
+            _keyboard_gpio_set(KBD_AMIGA_DAT, HIGH);
+
+        // hold /dat for 20us before pulsing /clk, then wait 50us before next bit
+        sleep_us(20);
+        _keyboard_gpio_set(KBD_AMIGA_CLK, LOW);
+        sleep_us(20);
+        _keyboard_gpio_set(KBD_AMIGA_CLK, HIGH);
+        sleep_us(50); // @todo should be 20?
+
+        // shift the bit pattern for next iteration
+        bit_mask >>= 1;
+    }
+
+    // set /dat to input for 5ms to signal end of key
+    _keyboard_gpio_set(KBD_AMIGA_DAT, HIGH);
+    sleep_ms(5);
+}
+
 void amiga_init()
 {
     // setup digital mode, direction and active high/low on /clk, /dat and /rst.
@@ -105,6 +180,8 @@ void amiga_init()
     _keyboard_gpio_set(KBD_AMIGA_RST, HIGH);
     reset_line_was_low = gpio_get(KBD_AMIGA_RST) == 0;
 
+    queue_init(&keyboard_event_queue, sizeof(amiga_keyboard_event_t), AKB_EVENT_QUEUE_DEPTH);
+
     // now the pins are setup, setup the timer callback to maintain keyboard comms in sync.
     // @todo add_alarm_in_ms() here
 
@@ -112,9 +189,9 @@ void amiga_init()
     // not doing anything during this time, so it's just so the computer is happy in the knowledge that we are
     // here.
     sleep_ms(1000);
-    amiga_send(AMIGA_INITPOWER, false);
+    amiga_send_immediate(AMIGA_INITPOWER, false);
     sleep_ms(200);
-    amiga_send(AMIGA_TERMPOWER, false);
+    amiga_send_immediate(AMIGA_TERMPOWER, false);
 
     // fin.
 }
@@ -149,7 +226,11 @@ void amiga_hid_modifier(hid_keyboard_modifier_bm_t modifier, bool up)
 
 void amiga_send(uint8_t keycode, bool up)
 {
-    uint8_t bit_position, bit_mask = 0x80, sendcode;
+    amiga_keyboard_event_t event = {
+        .type = AKB_EVENT_SEND,
+        .keycode = keycode,
+        .up = up,
+    };
 
     // we don't care about caps lock coming up; ignore it
     if ((keycode == AMIGA_CAPSLOCK) && up)
@@ -174,51 +255,34 @@ void amiga_send(uint8_t keycode, bool up)
     if ((ctrl && lamiga && ramiga) && !in_reset) {
         in_reset = true;
         local_reset_active = true;
+        external_reset_active = false;
+        amiga_clear_queued_events();
         amiga_reset_stateful_flags();
-        amiga_assert_reset();
+        event.type = AKB_EVENT_ASSERT_RESET;
+        event.keycode = 0;
+        event.up = false;
+        amiga_queue_event(&event, true);
+        return;
     }
 
     if (local_reset_active && !(ctrl && lamiga && ramiga)) {
         local_reset_active = false;
         in_reset = false;
-        amiga_release_reset();
+        event.type = AKB_EVENT_RELEASE_RESET;
+        event.keycode = 0;
+        event.up = false;
+        amiga_queue_event(&event, true);
+        event.type = AKB_EVENT_SEND;
+        event.keycode = keycode;
+        event.up = up;
     }
 
-    /**
-     * send the keycode to the amiga
-     *
-     * @todo hook up real keyboard to logic analyser and check if keycodes are sent whilst reset is being asserted
-     * (or reverse engineer the keyboard binary from the 6571); this avoids sending keycodes whilst in reset, but
-     * it would be good to verify that this is the situation for the original controller
+    /*
+     * Queue the transmit work so the HID callback path can return to USB
+     * servicing quickly. State transitions still happen immediately above.
      */
-    if (!in_reset) {
-        // copy input code, roll left, move msb to lsb
-        sendcode = keycode | (up ? 0x80 : 0x00);
-        sendcode <<= 1;
-        if (up || (keycode & 0x80))
-            sendcode |= 1;
-
-        for (bit_position = 0; bit_position < 8; bit_position++) {
-            if (sendcode & bit_mask)
-                _keyboard_gpio_set(KBD_AMIGA_DAT, LOW);
-            else
-                _keyboard_gpio_set(KBD_AMIGA_DAT, HIGH);
-
-            // hold /dat for 20us before pulsing /clk, then wait 50us before next bit
-            sleep_us(20);
-            _keyboard_gpio_set(KBD_AMIGA_CLK, LOW);
-            sleep_us(20);
-            _keyboard_gpio_set(KBD_AMIGA_CLK, HIGH);
-            sleep_us(50); // @todo should be 20?
-
-            // shift the bit pattern for next iteration
-            bit_mask >>= 1;
-        }
-    }
-
-    // set /dat to input for 5ms to signal end of key
-    _keyboard_gpio_set(KBD_AMIGA_DAT, HIGH);
-    sleep_ms(5);
+    if (!in_reset)
+        amiga_queue_event(&event, false);
 
     // @todo we _should_ be checking that the amiga has acked the code by watching /dat
     // for a lwo pulse. according to adcd2.1, while the computer cannot detect
@@ -258,6 +322,7 @@ void amiga_service()
         if (reset_line_low && !reset_line_was_low) {
             external_reset_active = true;
             in_reset = true;
+            amiga_clear_queued_events();
             amiga_reset_stateful_flags();
         } else if (!reset_line_low && reset_line_was_low && external_reset_active) {
             external_reset_active = false;
@@ -272,5 +337,24 @@ void amiga_service()
         _keyboard_gpio_set(KBD_AMIGA_RST, HIGH);
         sync_state = IDLE;
         clock_timer_fired = false;
+    }
+
+    amiga_keyboard_event_t event;
+
+    if (!queue_try_remove(&keyboard_event_queue, &event))
+        return;
+
+    switch (event.type) {
+        case AKB_EVENT_SEND:
+            amiga_send_immediate(event.keycode, event.up);
+            break;
+
+        case AKB_EVENT_ASSERT_RESET:
+            amiga_assert_reset();
+            break;
+
+        case AKB_EVENT_RELEASE_RESET:
+            amiga_release_reset();
+            break;
     }
 }
