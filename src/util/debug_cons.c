@@ -156,6 +156,27 @@ void dbgcons_amiga_key(uint8_t incode, uint8_t outcode, char *updown)
 #endif
 }
 
+void dbgcons_joystick(bool up, bool down, bool left, bool right, bool fire1, bool fire2)
+{
+    char linebuf[32] = "";
+
+    ahprintf(
+        VT_CUP_POS VT_EL_LIN
+        "[joy]   u:%d d:%d l:%d r:%d f1:%d f2:%d\n",
+        5, 1,
+        up, down, left, right, fire1, fire2
+    );
+
+    sprintf(
+        linebuf,
+        "joy %c%c%c%c %c%c",
+        up ? 'U' : '-', down ? 'D' : '-', left ? 'L' : '-', right ? 'R' : '-',
+        fire1 ? '1' : '-', fire2 ? '2' : '-'
+    );
+
+    disp_write(0, 2, linebuf);
+}
+
 void dbgcons_amiga_mod(uint8_t outcode, char updown)
 {
     // ls rs cl ct la ra lam ram

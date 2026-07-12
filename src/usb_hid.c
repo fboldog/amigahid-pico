@@ -22,12 +22,26 @@
 #include "input_bridge.h"
 #include "platform/amiga/keyboard_serial_io.h"
 #include "tusb_config.h"
+#include "hid_gamepad.h"
+#include "platform/amiga/keyboard_serial_io.h"  // amiga only, for now, until i get hold of an ST :D
+#include "platform/amiga/keyboard.h"
+#include "platform/amiga/quad_mouse.h"
+#include "platform/amiga/joystick.h"
 #include "util/output.h"
 #include "util/debug_cons.h"
 #include "usb_hid.h"
 
+#include <string.h>
+
 // maximum number of reports per hid device
 #define MAX_REPORT 4
+
+// controller fire mapping: which report-button bits assert each amiga fire line.
+// bit N corresponds to hid report button N (see the "[joy] buttons=" serial log).
+// reference pad layout: Y=bit0, B=bit1, A=bit2, X=bit3, L=bit4, R=bit5,
+// menu=bit6, home=bit7. each mask may OR several buttons together.
+#define JOY_FIRE1_BUTTONS (1u << 0) // Y -> fire 1 (db9 pin 6)
+#define JOY_FIRE2_BUTTONS (1u << 1) // B -> fire 2 (db9 pin 9)
 
 // textual representations of attached devices
 const uint8_t hid_protocol_type[] = { AP_H_UNKNOWN, AP_H_KEYBOARD, AP_H_MOUSE };
@@ -40,6 +54,14 @@ typedef struct
     uint8_t report_count;
     tuh_hid_report_info_t report_info[MAX_REPORT];
 } usb_hid_slot_t;
+
+// per-instance controller (joystick/gamepad) state; populated at mount time
+static struct _controller_info
+{
+    bool is_controller;
+    gamepad_layout_t layout;
+    gamepad_state_t last;
+} controller[CFG_TUH_HID];
 
 typedef struct
 {
@@ -56,6 +78,9 @@ static void process_report(uint8_t slot, uint8_t dev_addr, uint8_t instance, uin
 static void handle_event_keyboard(uint8_t slot, uint8_t dev_addr, uint8_t instance,
     hid_keyboard_report_t const *report);
 static void handle_event_mouse(uint8_t slot, hid_mouse_report_t const *report);
+static void handle_event_gamepad(uint8_t instance, uint8_t const *report, uint16_t len);
+static bool descriptor_is_controller(uint8_t instance);
+static void dump_report_descriptor(uint8_t dev_addr, uint8_t instance, uint8_t const *desc, uint16_t len);
 
 void hid_app_task(void)
 {
@@ -135,7 +160,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     int8_t slot = usb_hid_allocate_slot(dev_addr, instance);
     bool receive_ok;
 
-    dbgcons_plug(hid_protocol_type[hid_protocol]);
+    // start from a clean controller slot for this instance
+    controller[instance].is_controller = false;
+    memset(&controller[instance].layout, 0, sizeof(controller[instance].layout));
+    memset(&controller[instance].last, 0, sizeof(controller[instance].last));
+
+    // dump the raw report descriptor so an unrecognised controller can be
+    // diagnosed from the serial console (no-op unless DEBUG_MESSAGES is set)
+    dump_report_descriptor(dev_addr, instance, desc_report, desc_len);
 
     if (slot < 0)
         return;
@@ -147,13 +179,83 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     if (hid_protocol == HID_ITF_PROTOCOL_NONE) {
         hid_info[slot].report_count = tuh_hid_parse_report_descriptor(hid_info[slot].report_info, MAX_REPORT, desc_report, desc_len);
         // ahprintf("[PLUG] %02x report(s)\n", hid_info[instance].report_count);
+
+        // a device with no boot protocol that advertises a joystick or gamepad
+        // usage is a controller; learn its report layout so we can decode events
+        if (descriptor_is_controller(instance)) {
+            if (hid_gamepad_parse_descriptor(&controller[instance].layout, desc_report, desc_len)) {
+                controller[instance].is_controller = true;
+                gamepad_layout_t const *l = &controller[instance].layout;
+                ahprintf(
+                    "\n[joy] controller mounted (dev %d inst %d): report id %02x, "
+                    "x=%d y=%d hat=%d buttons=%d\n",
+                    dev_addr, instance, l->report_id,
+                    l->x.present, l->y.present, l->hat.present, l->button_count
+                );
+            }
+        }
     }
+
+    // announce the plug event with the correct device class
+    dbgcons_plug(controller[instance].is_controller ? AP_H_CONTROLLER : hid_protocol_type[hid_protocol]);
 
     receive_ok = tuh_hid_receive_report(dev_addr, instance);
     dbgcons_hid_status(dev_addr, instance, hid_protocol, receive_ok, hid_info[slot].report_count, true);
 
     if (!receive_ok) {
         // ahprintf("[PLUG] warning! report request failed; delayed initialisation?\n");
+    }
+}
+
+/**
+ * Inspect the parsed report descriptor for this instance and decide whether it
+ * describes a joystick or gamepad (as opposed to a keyboard/mouse in report
+ * mode, which also present on the desktop usage page).
+ *
+ * @param instance  Instance whose hid_info was just parsed
+ * @return true      Device advertises a joystick or gamepad usage
+ */
+static bool descriptor_is_controller(uint8_t instance)
+{
+    for (uint8_t i = 0; i < hid_info[instance].report_count; i++) {
+        tuh_hid_report_info_t const *ri = &hid_info[instance].report_info[i];
+        if (ri->usage_page == HID_USAGE_PAGE_DESKTOP
+            && (ri->usage == HID_USAGE_DESKTOP_JOYSTICK || ri->usage == HID_USAGE_DESKTOP_GAMEPAD)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Dump a raw HID report descriptor to the serial console in 16-byte rows, so an
+ * unrecognised controller's descriptor can be captured and decoded by hand.
+ * Compiles to nothing meaningful unless DEBUG_MESSAGES is enabled.
+ *
+ * @param dev_addr  Device address (for context in the log)
+ * @param instance  Instance number (for context in the log)
+ * @param desc      Raw report descriptor bytes (may be NULL)
+ * @param len       Number of descriptor bytes
+ */
+static void dump_report_descriptor(uint8_t dev_addr, uint8_t instance, uint8_t const *desc, uint16_t len)
+{
+    ahprintf("\n[hid] report descriptor (dev %d inst %d, %d bytes):\n", dev_addr, instance, len);
+
+    if (desc == NULL || len == 0) {
+        ahprintf("  <none - descriptor larger than CFG_TUH_ENUMERATION_BUFSIZE?>\n");
+        return;
+    }
+
+    // 16 bytes per line: "  0000: xx xx ... \n" (3 chars/byte + offset + nul)
+    char line[8 + 16 * 3 + 1];
+
+    for (uint16_t off = 0; off < len; off += 16) {
+        int pos = sprintf(line, "  %04x:", off);
+        for (uint16_t i = 0; i < 16 && (off + i) < len; i++)
+            pos += sprintf(line + pos, " %02x", desc[off + i]);
+
+        ahprintf("%s\n", line);
     }
 }
 
@@ -165,6 +267,16 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
  */
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance)
 {
+    if (controller[instance].is_controller) {
+        // release every joy port line so a yanked controller leaves nothing asserted
+        amiga_joystick_state_t idle = { 0 };
+        amiga_joystick_apply(&idle);
+
+        controller[instance].is_controller = false;
+        dbgcons_unplug(AP_H_CONTROLLER);
+        return;
+    }
+
     uint8_t hid_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     int8_t slot = usb_hid_find_slot(dev_addr, instance);
 
@@ -188,6 +300,14 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance)
  */
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len)
 {
+    // controllers aren't boot-protocol devices, so they'd otherwise fall into
+    // the generic report path below; intercept them first.
+    if (controller[instance].is_controller) {
+        handle_event_gamepad(instance, report, len);
+        tuh_hid_receive_report(dev_addr, instance);
+        return;
+    }
+
     uint8_t const hid_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     int8_t slot = usb_hid_find_slot(dev_addr, instance);
 
@@ -296,6 +416,46 @@ static void process_report(uint8_t slot, uint8_t dev_addr, uint8_t instance, uin
 static void handle_event_mouse(uint8_t slot, hid_mouse_report_t const *report)
 {
     input_bridge_handle_mouse(slot, report);
+}
+
+/**
+ * Handle a controller (joystick/gamepad) event and drive the amiga joy port.
+ *
+ * The report is decoded via the layout discovered at mount time into a
+ * normalised up/down/left/right + button state. Button 0 maps to Fire1 (db9
+ * pin 6), button 1 to Fire2 (db9 pin 9). Both the left analog stick and the
+ * hat/d-pad drive the four directions.
+ *
+ * @param instance  Instance number of reporting device
+ * @param report    Raw report as delivered by tinyusb (may include leading id)
+ * @param len       Length of report
+ */
+static void handle_event_gamepad(uint8_t instance, uint8_t const *report, uint16_t len)
+{
+    gamepad_state_t state;
+
+    if (!hid_gamepad_decode(&controller[instance].layout, report, len, &state))
+        return;
+
+    amiga_joystick_state_t joy = {
+        .up    = state.up,
+        .down  = state.down,
+        .left  = state.left,
+        .right = state.right,
+        .fire1 = (state.buttons & JOY_FIRE1_BUTTONS) != 0,
+        .fire2 = (state.buttons & JOY_FIRE2_BUTTONS) != 0,
+    };
+
+    amiga_joystick_apply(&joy);
+
+    // only log when something actually changed; controllers poll continuously
+    if (memcmp(&state, &controller[instance].last, sizeof(state)) != 0) {
+        dbgcons_joystick(joy.up, joy.down, joy.left, joy.right, joy.fire1, joy.fire2);
+        // raw button bitfield (bit N = report button N) to help identify which
+        // physical buttons map to which bit for the fire mapping
+        ahprintf("[joy] buttons=0x%08lx\n", (unsigned long)state.buttons);
+        controller[instance].last = state;
+    }
 }
 
 /**

@@ -15,6 +15,7 @@
 #include "display/disp_ssd.h"
 #include "platform/amiga/keyboard_serial_io.h"
 #include "platform/amiga/quad_mouse.h"
+#include "platform/amiga/joystick.h"
 #include "util/debug_cons.h"
 #include "util/output.h"
 
@@ -49,6 +50,9 @@ int main(void)
 
     // start amiga mouse emulation
     amiga_quad_mouse_init();
+
+    // prepare the joy port for digital joystick output (shares the mouse port pins)
+    amiga_joystick_init();
 
 #ifdef ENABLE_BLUETOOTH_HID
     bt_hid_init();

@@ -62,6 +62,17 @@
 #  define QM1_AMIGA_B1  11
 #  define QM1_AMIGA_B2  12
 #  define QM1_AMIGA_B3  13
+
+// port 2 (J6, the joystick port; port 1 / J5 is the mouse). traced from the kicad
+// netlist: each signal drives a mosfet gate (Q11-Q17) whose drain is the db9 pin,
+// so the drive polarity is identical to port 1 - pull low to assert, high-z to release.
+#  define QM2_AMIGA_HQ  21
+#  define QM2_AMIGA_VQ  22
+#  define QM2_AMIGA_H   26
+#  define QM2_AMIGA_V   27
+#  define QM2_AMIGA_B1  20
+#  define QM2_AMIGA_B2  19
+#  define QM2_AMIGA_B3  18
 #else
 #  error Board type has not been defined; check cmake command line
 #endif

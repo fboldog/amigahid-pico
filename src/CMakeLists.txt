@@ -2,6 +2,7 @@ add_executable(amigahid-pico
   input_bridge.c
   main.c
   usb_hid.c
+  hid_gamepad.c
 )
 
 if (ENABLE_BLUETOOTH_HID)
