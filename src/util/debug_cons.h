@@ -13,7 +13,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 enum debug_plug_types { AP_H_UNKNOWN, AP_H_KEYBOARD, AP_H_MOUSE, AP_H_CONTROLLER };
 
@@ -53,6 +52,6 @@ void dbgcons_bt_passkey(char const *message);
 
 void dbgcons_bt_passkey_clear(void);
 
-void dbgcons_joystick(bool up, bool down, bool left, bool right, bool fire1, bool fire2);void dbgcons_joystick(bool up, bool down, bool left, bool right, bool fire1, bool fire2);
+void dbgcons_joystick(bool up, bool down, bool left, bool right, bool fire1, bool fire2);
 
 #endif // _PLATFORM_COMMON_DEBUG_CONS_H
