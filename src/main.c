@@ -42,7 +42,11 @@ int main(void)
     dbgcons_init();
 
     // initialise the usb host stack on the rhport from tusb_config.h
-    tuh_init(BOARD_TUH_RHPORT);
+    if (!tuh_init(BOARD_TUH_RHPORT))
+        ahprintf("\n[usb] fatal: tuh_init() failed on rhport %d; no devices will enumerate\n",
+            BOARD_TUH_RHPORT);
+    else
+        ahprintf("\n[usb] host stack up on rhport %d, waiting for devices\n", BOARD_TUH_RHPORT);
 
     // we're single arch right now, but in future this should hand off to whatever the
     // configured arch is
