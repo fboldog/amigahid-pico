@@ -195,7 +195,20 @@ bool hid_gamepad_parse_descriptor(gamepad_layout_t *layout, const uint8_t *desc,
 
                     if (usable && g.usage_page == HID_USAGE_PAGE_DESKTOP) {
                         // walk each control in the field, matching it against
-                        // the queued usages (last usage repeats if we run short)
+                        // the queued usages (last usage repeats if we run short).
+                        //
+                        // a usage can legitimately repeat inside one item: budget
+                        // pads declare runs like "X, X, X, X, Y" where only the
+                        // final X is wired to the stick and the earlier copies sit
+                        // at a fixed value. binding the first one leaves the stick
+                        // dead on that axis and, worse, pins the direction on if
+                        // that dead field happens to rest away from centre. so take
+                        // the last occurrence within this item - record_axis() still
+                        // keeps the first item's field, so a second stick declared
+                        // in a later item cannot steal an axis we already have.
+                        bool has_x = false, has_y = false, has_hat = false;
+                        uint16_t off_x = 0, off_y = 0, off_hat = 0;
+
                         for (uint8_t i = 0; i < g.report_count; i++) {
                             uint16_t usage = usage_count
                                 ? usages[i < usage_count ? i : usage_count - 1]
@@ -204,18 +217,28 @@ bool hid_gamepad_parse_descriptor(gamepad_layout_t *layout, const uint8_t *desc,
 
                             switch (usage) {
                                 case HID_USAGE_DESKTOP_X:
-                                    record_axis(layout, &layout->x, &g, off);
+                                    off_x = off;
+                                    has_x = true;
                                     break;
                                 case HID_USAGE_DESKTOP_Y:
-                                    record_axis(layout, &layout->y, &g, off);
+                                    off_y = off;
+                                    has_y = true;
                                     break;
                                 case HID_USAGE_DESKTOP_HAT_SWITCH:
-                                    record_axis(layout, &layout->hat, &g, off);
+                                    off_hat = off;
+                                    has_hat = true;
                                     break;
                                 default:
                                     break;
                             }
                         }
+
+                        if (has_x)
+                            record_axis(layout, &layout->x, &g, off_x);
+                        if (has_y)
+                            record_axis(layout, &layout->y, &g, off_y);
+                        if (has_hat)
+                            record_axis(layout, &layout->hat, &g, off_hat);
                     } else if (usable && g.usage_page == HID_USAGE_PAGE_BUTTON && g.report_size == 1) {
                         // a run of 1-bit buttons; only capture the first block
                         if (!layout->has_buttons && (!layout->report_id || layout->report_id == g.report_id)) {
