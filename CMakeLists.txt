@@ -22,7 +22,7 @@ include(pico-sdk/pico_sdk_init.cmake)
 
 project(amigahid-pico C CXX ASM)
 
-add_compile_options(-Wall -Werror)
+add_compile_options(-Wall -Werror -Wno-unused-but-set-variable)
 
 # configuration options
 
