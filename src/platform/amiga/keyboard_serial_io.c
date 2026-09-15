@@ -38,10 +38,20 @@ static bool in_reset = false;
 static bool local_reset_active = false;
 static bool external_reset_active = false;
 static bool reset_line_was_low = false;
+static bool reset_output_asserted = false;
 
 enum _keyboard_pin_state { LOW, HIGH };
 
 #define AKB_EVENT_QUEUE_DEPTH 64
+#define AKB_STARTUP_INIT_DELAY_MS 1000
+#define AKB_STARTUP_TERM_DELAY_MS 200
+
+typedef enum
+{
+    AKB_STARTUP_WAIT_INIT_POWER = 0,
+    AKB_STARTUP_WAIT_TERM_POWER,
+    AKB_STARTUP_READY,
+} amiga_keyboard_startup_state_t;
 
 typedef enum
 {
@@ -58,6 +68,8 @@ typedef struct
 } amiga_keyboard_event_t;
 
 static queue_t keyboard_event_queue;
+static amiga_keyboard_startup_state_t startup_state;
+static absolute_time_t startup_deadline;
 
 static inline void amiga_reset_stateful_flags(void)
 {
@@ -161,6 +173,29 @@ static void amiga_send_immediate(uint8_t keycode, bool up)
     sleep_ms(5);
 }
 
+static bool amiga_startup_service(void)
+{
+    if (startup_state == AKB_STARTUP_READY)
+        return false;
+
+    if (in_reset)
+        return true;
+
+    if (absolute_time_diff_us(get_absolute_time(), startup_deadline) > 0)
+        return true;
+
+    if (startup_state == AKB_STARTUP_WAIT_INIT_POWER) {
+        amiga_send_immediate(AMIGA_INITPOWER, false);
+        startup_deadline = make_timeout_time_ms(AKB_STARTUP_TERM_DELAY_MS);
+        startup_state = AKB_STARTUP_WAIT_TERM_POWER;
+        return true;
+    }
+
+    amiga_send_immediate(AMIGA_TERMPOWER, false);
+    startup_state = AKB_STARTUP_READY;
+    return true;
+}
+
 void amiga_init()
 {
     // setup digital mode, direction and active high/low on /clk, /dat and /rst.
@@ -181,19 +216,8 @@ void amiga_init()
     reset_line_was_low = gpio_get(KBD_AMIGA_RST) == 0;
 
     queue_init(&keyboard_event_queue, sizeof(amiga_keyboard_event_t), AKB_EVENT_QUEUE_DEPTH);
-
-    // now the pins are setup, setup the timer callback to maintain keyboard comms in sync.
-    // @todo add_alarm_in_ms() here
-
-    // wait a full second then send initpower, pause 200ms and then termpower. unlike the amiga kbd 6502, we're
-    // not doing anything during this time, so it's just so the computer is happy in the knowledge that we are
-    // here.
-    sleep_ms(1000);
-    amiga_send_immediate(AMIGA_INITPOWER, false);
-    sleep_ms(200);
-    amiga_send_immediate(AMIGA_TERMPOWER, false);
-
-    // fin.
+    startup_state = AKB_STARTUP_WAIT_INIT_POWER;
+    startup_deadline = make_timeout_time_ms(AKB_STARTUP_INIT_DELAY_MS);
 }
 
 bool amiga_caps_lock()
@@ -299,6 +323,7 @@ void amiga_assert_reset()
     // the pause is beneficial for ensuring the reset signal is picked up by the amiga.
     // (thanks @reinauer for submitting this in issue #31 and testing on your a3000)
     _keyboard_gpio_set(KBD_AMIGA_CLK, LOW);
+    reset_output_asserted = true;
     sleep_us(500000);
 }
 
@@ -307,6 +332,7 @@ void amiga_release_reset()
     // ahprintf("[akb] *** RESET BEING RELEASED ***\n");
     _keyboard_gpio_set(KBD_AMIGA_RST, HIGH);
     _keyboard_gpio_set(KBD_AMIGA_CLK, HIGH);
+    reset_output_asserted = false;
 }
 
 void amiga_service()
@@ -318,7 +344,7 @@ void amiga_service()
      * side when the Amiga asserts a hard reset externally. Big-box systems
      * generally do not wire this line, so this path is best-effort only.
      */
-    if (!local_reset_active) {
+    if (!local_reset_active && !reset_output_asserted) {
         if (reset_line_low && !reset_line_was_low) {
             external_reset_active = true;
             in_reset = true;
@@ -340,6 +366,24 @@ void amiga_service()
     }
 
     amiga_keyboard_event_t event;
+
+    // A reset chord can arrive over USB while keyboard power-up is pending.
+    // Process its control events first, while keeping ordinary keys queued.
+    if (queue_try_peek(&keyboard_event_queue, &event) && event.type != AKB_EVENT_SEND) {
+        queue_try_remove(&keyboard_event_queue, &event);
+
+        if (event.type == AKB_EVENT_ASSERT_RESET)
+            amiga_assert_reset();
+        else
+            amiga_release_reset();
+
+        return;
+    }
+
+    // Keep USB and the other main-loop services running during the keyboard
+    // power-up delays. Input received before TERMPOWER remains queued.
+    if (amiga_startup_service())
+        return;
 
     if (!queue_try_remove(&keyboard_event_queue, &event))
         return;

@@ -22,6 +22,7 @@ it currently supports keyboards and mice and provides connection via the interna
 
 * [installation](./doc/installation.md)
 * [hardware](./doc/hardware.md)
+* [startup sequence](./doc/startup.md)
 * [errors in revisions (errata)](./doc/errata.md)
 
 ## history

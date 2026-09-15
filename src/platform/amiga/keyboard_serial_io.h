@@ -19,7 +19,8 @@
 /**
  * @brief Setup Amiga keyboard communication
  *
- * Starts clocks, sets up ISRs and sends init codes to the host
+ * Sets up the keyboard pins and schedules the power-up sequence. The init
+ * codes are sent later by amiga_service() without blocking other startup work.
  */
 void amiga_init();
 

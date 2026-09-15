@@ -35,28 +35,35 @@ int main(void)
     // tinyusb board init; led, uart, button, usb
     board_init();
 
-    // initialise the i2c controller and send the init sequence to the display
-    disp_ssd_init();
+    // Put all Amiga-facing pins in their inactive state immediately. Keyboard
+    // power-up continues asynchronously from amiga_service().
+    amiga_init();
+    amiga_quad_mouse_init();
+    amiga_joystick_init();
 
-    // say hello, trevor ("hello, trevor")
+    // Initialise the host controller early. TinyUSB 0.21 performs attach
+    // debounce, reset and enumeration asynchronously from tuh_task().
+    const tusb_rhport_init_t usb_host_init = {
+        .role = TUSB_ROLE_HOST,
+        .speed = TUH_OPT_HIGH_SPEED ? TUSB_SPEED_HIGH : TUSB_SPEED_FULL,
+    };
+    bool usb_host_ready = tusb_init(BOARD_TUH_RHPORT, &usb_host_init);
+
+    // Consume a pending attach immediately so TinyUSB can start its async
+    // debounce interval while the remaining status facilities initialise.
+    if (usb_host_ready)
+        tuh_task();
+
+    // Initialise status output after time-critical I/O is safe and USB host
+    // enumeration has been armed.
+    disp_ssd_init();
     dbgcons_init();
 
-    // initialise the usb host stack on the rhport from tusb_config.h
-    if (!tuh_init(BOARD_TUH_RHPORT))
-        ahprintf("\n[usb] fatal: tuh_init() failed on rhport %d; no devices will enumerate\n",
+    if (!usb_host_ready)
+        ahprintf("\n[usb] fatal: tusb_init() failed on rhport %d; no devices will enumerate\n",
             BOARD_TUH_RHPORT);
     else
         ahprintf("\n[usb] host stack up on rhport %d, waiting for devices\n", BOARD_TUH_RHPORT);
-
-    // we're single arch right now, but in future this should hand off to whatever the
-    // configured arch is
-    amiga_init();
-
-    // start amiga mouse emulation
-    amiga_quad_mouse_init();
-
-    // prepare the joy port for digital joystick output (shares the mouse port pins)
-    amiga_joystick_init();
 
 #ifdef ENABLE_BLUETOOTH_HID
     bt_hid_init();
