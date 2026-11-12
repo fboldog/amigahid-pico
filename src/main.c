@@ -49,6 +49,10 @@ int main(void)
     };
     bool usb_host_ready = tusb_init(BOARD_TUH_RHPORT, &usb_host_init);
 
+    // HOLD_THE_DOOR only covers host-stack initialisation. Release even when
+    // initialisation fails so a USB fault cannot leave the Amiga in reset.
+    amiga_release_boot_reset();
+
     // Consume a pending attach immediately so TinyUSB can start its async
     // debounce interval while the remaining status facilities initialise.
     if (usb_host_ready)

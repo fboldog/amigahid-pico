@@ -39,6 +39,7 @@ static bool local_reset_active = false;
 static bool external_reset_active = false;
 static bool reset_line_was_low = false;
 static bool reset_output_asserted = false;
+static bool boot_reset_hold_active = false;
 
 enum _keyboard_pin_state { LOW, HIGH };
 
@@ -178,6 +179,9 @@ static bool amiga_startup_service(void)
     if (startup_state == AKB_STARTUP_READY)
         return false;
 
+    if (boot_reset_hold_active)
+        return true;
+
     if (in_reset)
         return true;
 
@@ -208,15 +212,39 @@ void amiga_init()
     gpio_set_function(KBD_AMIGA_RST, GPIO_FUNC_SIO);
     gpio_pull_up(KBD_AMIGA_RST);
 
-    // all pins are active low, meaning if /rst is current at 0, the amiga is held in reset.
-    // rectify this by putting all pins in open drain. this should bring the amiga to boot.
+    // All pins are active low. Leave data and clock open-drain inactive.
     _keyboard_gpio_set(KBD_AMIGA_DAT, HIGH);
     _keyboard_gpio_set(KBD_AMIGA_CLK, HIGH);
+
+#ifdef HOLD_THE_DOOR
+    // Assert the dedicated reset output while TinyUSB initialises. This is
+    // intentionally separate from amiga_assert_reset(), which also holds clock
+    // low for big-box Amigas and performs a blocking 500 ms delay.
+    _keyboard_gpio_set(KBD_AMIGA_RST, LOW);
+    boot_reset_hold_active = true;
+    reset_output_asserted = true;
+#else
     _keyboard_gpio_set(KBD_AMIGA_RST, HIGH);
+#endif
+
     reset_line_was_low = gpio_get(KBD_AMIGA_RST) == 0;
 
     queue_init(&keyboard_event_queue, sizeof(amiga_keyboard_event_t), AKB_EVENT_QUEUE_DEPTH);
     startup_state = AKB_STARTUP_WAIT_INIT_POWER;
+    startup_deadline = make_timeout_time_ms(AKB_STARTUP_INIT_DELAY_MS);
+}
+
+void amiga_release_boot_reset()
+{
+    if (!boot_reset_hold_active)
+        return;
+
+    _keyboard_gpio_set(KBD_AMIGA_RST, HIGH);
+    boot_reset_hold_active = false;
+    reset_output_asserted = false;
+    reset_line_was_low = false;
+
+    // Start the keyboard power-up timing when the Amiga is allowed to boot.
     startup_deadline = make_timeout_time_ms(AKB_STARTUP_INIT_DELAY_MS);
 }
 

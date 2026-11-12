@@ -25,6 +25,13 @@
 void amiga_init();
 
 /**
+ * @brief Release the optional HOLD_THE_DOOR boot reset after USB host init
+ *
+ * This is a no-op unless HOLD_THE_DOOR asserted reset during amiga_init().
+ */
+void amiga_release_boot_reset();
+
+/**
  * @brief Get the caps lock status
  *
  * @return true     Caps lock is on

@@ -47,6 +47,12 @@ if (DEBUG_HID_STATUS)
 	add_compile_definitions(DEBUG_HID_STATUS=1)
 endif ()
 
+# hold the Amiga reset output from interface setup until TinyUSB host init returns
+option(HOLD_THE_DOOR "Hold Amiga reset until the USB host stack is initialized" OFF)
+if (HOLD_THE_DOOR)
+	add_compile_definitions(HOLD_THE_DOOR=1)
+endif ()
+
 # enable bluetooth hid host support when building for pico w
 option(ENABLE_BLUETOOTH_HID "Enable Bluetooth HID host support on Pico W" OFF)
 if (ENABLE_BLUETOOTH_HID)
