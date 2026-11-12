@@ -31,18 +31,5 @@ optional build flag (`-DHOLD_THE_DOOR=ON`, default off):
 only the dedicated reset line is asserted (clock is not held low), so it has no
 effect on big-box amigas, which don't wire reset through the keyboard connector.
 
-## dependencies
-
-- pico sdk: 2.3.1 (submodule)
-- tinyusb: 0.21.0 (`dae3f9a366bfcddbf9dcf1b48d7500286a849539`)
-
-sdk 2.3.1 pins tinyusb 0.18.0, so check out 0.21.0 manually after a recursive
-submodule update:
-
-```shell
-git -C pico-sdk/lib/tinyusb fetch --tags
-git -C pico-sdk/lib/tinyusb checkout 0.21.0
-```
-
-tinyusb 0.21.0 handles port debounce, reset and enumeration in its host task, so
+tinyusb handles port debounce, reset and enumeration in its host task, so
 the main loop must call `tuh_task()` frequently.
